@@ -8,11 +8,16 @@ Do_Web_app/
     └── welcome.html
 
 app.py
-from flask import Flask, request, render_template, redirect, make_response
+from flask import Flask, request, render_template, redirect, make_response, session
 import sqlite3
 import os
+import hashlib
+from werkzeug.security import generate_password_hash, check_password_hash
+
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Случайный секретный ключ
 DB_PATH = 'db.sqlite3'
+
 def init_db():
     if not os.path.exists(DB_PATH):
         conn = sqlite3.connect(DB_PATH)
@@ -26,21 +31,38 @@ def init_db():
         ''')
         conn.commit()
         conn.close()
+
+@app.route('/')
+def home():
+    return redirect('/login')
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
+        
+        if not username or not password:
+            return "Username and password are required", 400
+            
+        hashed_password = generate_password_hash(password)
+        
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         try:
-            c.execute(f"INSERT INTO users (username, password) VALUES ('{username}', '{password}')")
+            c.execute("INSERT INTO users (username, password) VALUES (?, ?)", 
+                     (username, hashed_password))
             conn.commit()
+        except sqlite3.IntegrityError:
+            conn.close()
+            return "Username already exists", 400
         except Exception as e:
             conn.close()
-            return f"Registration error: {e}"
+            return f"Registration error: {str(e)}", 500
+            
         conn.close()
         return redirect('/login')
+        
     return render_template('register.html')
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -48,27 +70,41 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
+        
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute(f"SELECT * FROM users WHERE username='{username}' AND password='{password}'")
+        c.execute("SELECT * FROM users WHERE username=?", (username,))
         user = c.fetchone()
         conn.close()
-        if user:
+        
+        if user and check_password_hash(user[2], password):
+            session['username'] = username
             resp = make_response(redirect('/welcome'))
-            resp.set_cookie('username', username)
+            resp.set_cookie('username', username, httponly=True, secure=True)
             return resp
-        else:
-            return "Login error"
+            
+        return "Invalid username or password", 401
+        
     return render_template('login.html')
+
 @app.route('/welcome')
 def welcome():
-    username = request.cookies.get('username')
-    if not username:
+    if 'username' not in session:
         return redirect('/login')
+        
+    username = session['username']
     return render_template('welcome.html', username=username)
+
+@app.route('/logout')
+def logout():
+    session.pop('username', None)
+    resp = make_response(redirect('/login'))
+    resp.set_cookie('username', '', expires=0)
+    return resp
+
 if __name__ == '__main__':
     init_db()
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
 
 templates/register.html
  <!DOCTYPE html>
@@ -118,11 +154,15 @@ templates/welcome.html
 
 requirements.txt
 flask
+werkzeug
 
 Dockerfile
-FROM python:3.11
+FROM python:3.11-slim
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN pip install -r requirements.txt
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
 EXPOSE 5000
 CMD ["python", "app.py"]
